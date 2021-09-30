@@ -1,0 +1,112 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+    - name: Addding Kubernetes repository
+      ansible.builtin.blockinfile:
+        path: /etc/yum.repos.d/kubernetes.repo
+        block: |
+          [kubernetes]
+          name=Kubernetes
+          baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+          enabled=1
+          gpgcheck=1
+          repo_gpgcheck=1
+          gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+          create: yes
+    
+    - name: Initializing the kubelet service
+      ansible.builtin.systemd:
+        state: started
+        enabled: yes
+        name: kubelet
+
+    - name: Update modules
+      yum: 
+        name: '*'
+        state: latest
+        
+    - name: Install Kubernetes Prereq + git
+      yum:
+        name: kubelet, kubeadm, kubectl, git
+        state: present
+        
+    - name: Updating host file with Kubernet Master & nodes
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        block: |
+          192.168.5.110 master.zlkube.com master-node
+          192.168.5.111 node1.zlkube.com node1 worker-node
+          192.168.5.112 node2.zlkube.com node2 worker-node
+        
+    - name: Create kube O.S Group
+      ansible.builtin.group:
+        name: kube
+        state: present
+        
+    - name: Adding Kubernetes admin user
+      ansible.builtin.user:
+        name: kubeadm
+        shell: /bin/bash
+        group: kube
+        createhome: yes 
+        generate_ssh_key: yes
+        comment: Kubernetes user
+        
+    - name: allow 'kubeadm' to use sudo without needing a password
+      lineinfile:
+        dest: /etc/sudoers
+        line: 'kubeadm ALL=(ALL) NOPASSWD: ALL'
+        validate: 'visudo -cf %s'
+        
+    - name: set up authorized keys for the adm user
+      authorized_key: user=kubeadm key="{{item}}"
+      with_file:
+        - ~/.ssh/id_rsa.pub
+        
+    - name: Update modules
+      yum: 
+        name: '*'
+        state: latest
+        
+    - name: Permit communication of Kubernetes cluster(10251/tcp)
+      ansible.posix.firewalld:
+        port: 10250-10352/tcp
+        permanent: yes
+        state: enabled
+        
+    - name: Permit communication of Kubernetes cluster(10255/tcp)
+      ansible.posix.firewalld:
+        port: 10255/tcp
+        permanent: yes
+        state: enabled
+        
+    - name: Firewalld Reloading
+      ansible.builtin.systemd:
+        state: restarted
+        enabled: yes
+        name: firewalld
+        
+    - name: Updating iptable configuration
+      ansible.builtin.blockinfile:
+        path: /etc/sysctl.d/k8s.conf
+        block: |
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.bridge.bridge-nf-call-iptables = 1      
+          
+    - name: This ensures that packets are properly processed by IP tables during filtering and port forwarding.
+      ansible.builtin.shell: sysctl --system
+      
+    - name: Disable SELinux
+      ansible.posix.selinux:
+        state: disabled
+         
+    - name: Reenable SWAP in fstab (1/2)
+      replace:
+        path: /etc/fstab
+        regexp: '^# (.+?\sswap\s+sw\s+.*)$'
+        replace: '\1'
+
+    - name: Enable SWAP (2/2)
+      shell: |
+        swapon -a
